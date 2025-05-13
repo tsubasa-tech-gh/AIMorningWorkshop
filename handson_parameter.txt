@@ -1,0 +1,15 @@
+# コピペ用各種パラメーター
+
+## DBオブジェクト関連
+
+データベース名： snowretail_db
+
+スキーマ名: snowretail_schema
+
+テーブル名: 
+  - snow_retail_documents
+  - snow_retail_documents_chunked
+
+ウェアハウス名: compute_wh
+
+Cortex SearchのService名: snow_retail_search_service
