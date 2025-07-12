@@ -1,5 +1,5 @@
 # =========================================================
-# Snowflake Cortex AI モーニングワークショップ
+# Snowflake AI実践ワークショップ
 # 社内問い合わせチャットボットアプリケーション
 # =========================================================
 # 概要: 
@@ -7,113 +7,152 @@
 # 社内問い合わせに対応するチャットボットのデモアプリケーションです。
 #
 # 機能:
-# - シンプルなチャットボット (COMPLETE関数)
+# - シンプルなチャットボット (AI_COMPLETE関数)
 # - RAGチャットボット (Cortex Searchを用いた社内文書Q&A)
 #
 # Created by Tsubasa Kanno @Snowflake
 # =========================================================
 
-# =========================================================
-# 必要なライブラリのインポート
-# =========================================================
-# 基本ライブラリ
 import streamlit as st
-import pandas as pd
-import json
-import time
+from snowflake.snowpark.context import get_active_session
+from snowflake.core import Root
 
 # Streamlitの設定
 st.set_page_config(layout="wide")
 
-# Snowflake関連ライブラリ
-from snowflake.snowpark.context import get_active_session
-from snowflake.cortex import Complete as CompleteText
-from snowflake.core import Root
-
 # =========================================================
 # 定数定義
 # =========================================================
-# COMPLETE関数用のLLMモデル選択肢
-COMPLETE_MODELS = [
+# AI_COMPLETE関数用のLLMモデル選択肢
+AI_COMPLETE_MODELS = [
+    "llama4-maverick",
     "claude-3-5-sonnet",
-    "deepseek-r1",
-    "mistral-large2",
-    "llama3.3-70b",
-    "snowflake-llama-3.3-70b"
+    "mistral-large2"
 ]
-
-# =========================================================
-# Snowflake接続
-# =========================================================
 
 # Snowflakeセッションの取得
 snowflake_session = get_active_session()
+
+# =========================================================
+# ユーティリティ関数
+# =========================================================
+def get_ai_response(model: str, prompt: str):
+    """AI応答を取得してエスケープ処理を行う"""
+    try:
+        escaped_prompt = prompt.replace("'", "''")
+        
+        response_query = f"""
+        SELECT AI_COMPLETE(
+            '{model}',
+            '{escaped_prompt}'
+        ) as response
+        """
+        
+        response_result = snowflake_session.sql(response_query).collect()
+        
+        if response_result and response_result[0]['RESPONSE']:
+            response = response_result[0]['RESPONSE']
+            
+            # 応答の後処理
+            if response.startswith('"') and response.endswith('"'):
+                response = response[1:-1]
+            
+            response = response.replace('\\n', '\n')
+            response = response.replace('\\t', '\t')
+            response = response.replace('\\"', '"')
+            response = response.replace("\\'", "'")
+            response = response.replace('\\\\', '\\')
+            
+            return response
+        else:
+            return "応答を取得できませんでした。"
+            
+    except Exception as e:
+        return f"エラーが発生しました: {str(e)}"
+
+@st.fragment
+def render_document_details(doc, doc_index, unique_id):
+    """ドキュメントの詳細表示を管理するフラグメント"""
+    toggle_key = f"show_details_{unique_id}_doc_{doc_index}"
+    if toggle_key not in st.session_state:
+        st.session_state[toggle_key] = False
+    
+    st.markdown(f"**📋 タイトル**: {doc['title']}")
+    st.markdown(f"**📂 種類**: {doc['document_type']} | **🏢 部署**: {doc['department']}")
+    
+    content = doc['content']
+    max_chars = 200
+    
+    if len(content) <= max_chars:
+        st.markdown(f"**📖 内容**: {content}")
+    else:
+        if st.session_state[toggle_key]:
+            st.markdown(f"**📖 内容**: {content}")
+            if st.button("🔼 概要のみ表示", key=f"hide_{toggle_key}"):
+                st.session_state[toggle_key] = False
+                st.rerun(scope="fragment")
+        else:
+            st.markdown(f"**📖 内容**: {content[:max_chars]}...")
+            if st.button("🔽 詳細を表示", key=f"show_{toggle_key}"):
+                st.session_state[toggle_key] = True
+                st.rerun(scope="fragment")
 
 # =========================================================
 # UI関数
 # =========================================================
 
 def render_simple_chatbot_page():
-    """シンプルチャットボットページを表示します。"""
+    """シンプルチャットボットページを表示"""
     st.header("シンプルチャットボット")
     
-    # ワークショップ向けの説明
     st.info("""
     ## 🤖 シンプルチャットボットについて
     
-    このページでは、Snowflake Cortexの生成AIモデルを使用した基本的なチャットボットを体験できます。
+    このページでは、Snowflake CortexのAI_COMPLETE関数を使用した基本的なチャットボットを体験できます。
     
     ### 主な機能
-    * **テキスト生成**: COMPLETE関数を使用して、入力プロンプトに基づいた応答を生成
+    * **テキスト生成**: AI_COMPLETE関数を使用して、入力プロンプトに基づいた応答を生成
     * **チャット履歴の保持**: 会話の文脈を保持し、より自然な対話を実現
     
-    ### 大事なポイント
-    * このシンプルなチャットボットは外部データを参照せず、モデルの知識だけで応答を生成します
+    ### 重要なポイント
+    * このチャットボットは外部データを参照せず、モデルの知識だけで応答を生成します
     """)
     
-    # セッション状態の初期化
     if "messages" not in st.session_state:
         st.session_state.messages = []
-        st.session_state.chat_history = ""
     
-    # チャット履歴のクリアボタン
     if st.button("チャット履歴をクリア"):
         st.session_state.messages = []
-        st.session_state.chat_history = ""
         st.rerun()
     
-    # チャット履歴の表示
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
     
-    # ユーザー入力の処理
     if prompt := st.chat_input("メッセージを入力してください"):
-        # ユーザーメッセージの表示と履歴の更新
         st.session_state.messages.append({"role": "user", "content": prompt})
-        st.session_state.chat_history += f"User: {prompt}\n"
         with st.chat_message("user"):
             st.markdown(prompt)
         
         try:
-            # Cortex Completeを使用して応答を生成
-            full_prompt = st.session_state.chat_history + "AI: "
-            response = CompleteText(complete_model, full_prompt)
+            chat_history = "\n".join([
+                f"{msg['role']}: {msg['content']}" 
+                for msg in st.session_state.messages[-5:]
+            ])
             
-            # 応答の表示と履歴の更新
+            response = get_ai_response(ai_complete_model, chat_history + "\nAI: ")
+            
             st.session_state.messages.append({"role": "assistant", "content": response})
-            st.session_state.chat_history += f"AI: {response}\n"
             with st.chat_message("assistant"):
                 st.markdown(response)
-            
+                
         except Exception as e:
             st.error(f"応答の生成中にエラーが発生しました: {str(e)}")
 
 def render_rag_chatbot_page():
-    """RAGチャットボットページを表示します。"""
+    """RAGチャットボットページを表示"""
     st.header("社内問い合わせチャットボット")
     
-    # ワークショップ向けの説明
     st.info("""
     ## 📚 社内問い合わせチャットボットについて
     
@@ -124,40 +163,32 @@ def render_rag_chatbot_page():
     * **文脈を考慮した回答生成**: 検索結果を元に、的確な回答を生成
     * **参考文書の表示**: 回答の根拠となった文書を確認可能
     
-    ### 大事なポイント
-    * 社内文書に関する質問や、製品・サービスに関する具体的な質問をしてみてください
-    * 質問が具体的であるほど、より関連性の高いドキュメントが検索されます
-    * 参考ドキュメントを展開すると、応答の生成に使用されたドキュメントを確認できます
+    ### 使用方法
+    * 社内文書に関する質問や、製品・サービスに関する具体的な質問をしてください
     * 部署やドキュメントタイプで検索対象を絞り込むことができます
     """)
     
-    # Snowflake Root オブジェクトの初期化
     root = Root(snowflake_session)
     
-    # 現在のデータベースとスキーマを取得
-    current_db_schema = snowflake_session.sql("SELECT CURRENT_DATABASE(), CURRENT_SCHEMA()").collect()[0]
-    current_database = current_db_schema['CURRENT_DATABASE()']
-    current_schema = current_db_schema['CURRENT_SCHEMA()']
+    current_info = snowflake_session.sql("SELECT CURRENT_DATABASE(), CURRENT_SCHEMA()").collect()[0]
+    current_database = current_info['CURRENT_DATABASE()']
+    current_schema = current_info['CURRENT_SCHEMA()']
     
-    # 部署とドキュメントタイプの取得
     try:
-        departments = snowflake_session.sql("""
-            SELECT DISTINCT department FROM snow_retail_documents
-            ORDER BY department
-        """).collect()
+        departments = snowflake_session.sql(
+            "SELECT DISTINCT department FROM snow_retail_documents ORDER BY department"
+        ).collect()
         department_list = [row['DEPARTMENT'] for row in departments]
         
-        document_types = snowflake_session.sql("""
-            SELECT DISTINCT document_type FROM snow_retail_documents
-            ORDER BY document_type
-        """).collect()
+        document_types = snowflake_session.sql(
+            "SELECT DISTINCT document_type FROM snow_retail_documents ORDER BY document_type"
+        ).collect()
         document_type_list = [row['DOCUMENT_TYPE'] for row in document_types]
     except Exception as e:
-        st.warning("部署とドキュメントタイプの取得に失敗しました。フィルター機能は使用できません。")
+        st.warning("フィルター情報の取得に失敗しました。基本機能のみ利用可能です。")
         department_list = []
         document_type_list = []
     
-    # 検索フィルターの設定
     with st.expander("検索フィルター設定", expanded=False):
         col1, col2 = st.columns(2)
         
@@ -175,160 +206,95 @@ def render_rag_chatbot_page():
                 default=[]
             )
     
-    # セッション状態の初期化
     if "rag_messages" not in st.session_state:
         st.session_state.rag_messages = []
-        st.session_state.rag_chat_history = ""
     
-    # チャット履歴のクリアボタン
     if st.button("チャット履歴をクリア"):
         st.session_state.rag_messages = []
-        st.session_state.rag_chat_history = ""
         st.rerun()
     
-    # チャット履歴の表示
     for message in st.session_state.rag_messages:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
             if "relevant_docs" in message:
                 with st.expander("参考ドキュメント"):
-                    for doc in message["relevant_docs"]:
-                        st.markdown(f"""
-                        **タイトル**: {doc['title']}  
-                        **種類**: {doc['document_type']}  
-                        **部署**: {doc['department']}  
-                        **内容**: {doc['content']}
-                        """)
+                    for i, doc in enumerate(message["relevant_docs"]):
+                        render_document_details(doc, i, hash(str(message['content'])))
+                        if i < len(message["relevant_docs"]) - 1:
+                            st.markdown("---")
     
-    # ユーザー入力の処理
     if prompt := st.chat_input("質問を入力してください"):
-        # ユーザーメッセージの表示と履歴の更新
         st.session_state.rag_messages.append({"role": "user", "content": prompt})
-        st.session_state.rag_chat_history += f"User: {prompt}\n"
         with st.chat_message("user"):
             st.markdown(prompt)
         
         try:
-            # Cortex Search Serviceの取得
-            try:
-                search_service = (
-                    root.databases[current_database]
-                    .schemas[current_schema]
-                    .cortex_search_services["snow_retail_search_service"]
-                )
-                
-                # フィルターの構築
+            search_service = (
+                root.databases[current_database]
+                .schemas[current_schema]
+                .cortex_search_services["snow_retail_search_service"]
+            )
+            search_filter = None
+            if selected_departments or selected_document_types:
                 filter_conditions = []
                 
-                # 部署フィルターの追加
                 if selected_departments:
-                    dept_conditions = []
-                    for dept in selected_departments:
-                        dept_conditions.append({"@eq": {"department": dept}})
-                    
-                    if len(dept_conditions) == 1:
-                        filter_conditions.append(dept_conditions[0])
-                    else:
-                        filter_conditions.append({"@or": dept_conditions})
+                    dept_conditions = [{"@eq": {"department": dept}} for dept in selected_departments]
+                    filter_conditions.append({"@or": dept_conditions} if len(dept_conditions) > 1 else dept_conditions[0])
                 
-                # ドキュメントタイプフィルターの追加
                 if selected_document_types:
-                    type_conditions = []
-                    for doc_type in selected_document_types:
-                        type_conditions.append({"@eq": {"document_type": doc_type}})
-                    
-                    if len(type_conditions) == 1:
-                        filter_conditions.append(type_conditions[0])
-                    else:
-                        filter_conditions.append({"@or": type_conditions})
+                    type_conditions = [{"@eq": {"document_type": doc_type}} for doc_type in selected_document_types]
+                    filter_conditions.append({"@or": type_conditions} if len(type_conditions) > 1 else type_conditions[0])
                 
-                # 最終的なフィルターの組み立て
-                search_filter = None
-                if filter_conditions:
-                    if len(filter_conditions) == 1:
-                        search_filter = filter_conditions[0]
-                    else:
-                        search_filter = {"@and": filter_conditions}
+                search_filter = {"@and": filter_conditions} if len(filter_conditions) > 1 else filter_conditions[0]
+            search_args = {
+                "query": prompt,
+                "columns": ["title", "chunked_content", "document_type", "department", "document_id"],
+                "limit": 3
+            }
+            
+            if search_filter:
+                search_args["filter"] = search_filter
+            
+            search_results = search_service.search(**search_args)
+            
+            if search_results.results:
+                document_ids = list(set([result["document_id"] for result in search_results.results]))
                 
-                # フィルター情報の表示
-                if selected_departments or selected_document_types:
-                    filter_info = []
-                    if selected_departments:
-                        filter_info.append(f"部署: {', '.join(selected_departments)}")
-                    if selected_document_types:
-                        filter_info.append(f"ドキュメントタイプ: {', '.join(selected_document_types)}")
-                    st.info(f"以下の条件で検索します: {' / '.join(filter_info)}")
-                
-                # 検索の実行（日本語のまま検索）
-                search_args = {
-                    "query": prompt,
-                    "columns": ["title", "chunked_content", "document_type", "department", "document_id"],
-                    "limit": 3
-                }
-                
-                # フィルターがある場合は追加
-                if search_filter:
-                    search_args["filter"] = search_filter
-                
-                search_results = search_service.search(**search_args)
-                
-                # 検索結果から元のドキュメントを取得するためのdocument_idリストを取得
-                document_ids = [result["document_id"] for result in search_results.results]
-                
-                # 重複するdocument_idを排除
-                unique_document_ids = list(set(document_ids))
-                
-                # 元のドキュメントテーブルから完全なCONTENTを取得
                 original_docs_query = f"""
-                    SELECT document_id, title, content, document_type, department
-                    FROM snow_retail_documents
-                    WHERE document_id IN ({','.join(["'" + str(doc_id) + "'" for doc_id in unique_document_ids])})
+                SELECT document_id, title, content, document_type, department
+                FROM snow_retail_documents
+                WHERE document_id IN ({','.join(["'" + str(doc_id) + "'" for doc_id in document_ids])})
                 """
                 
                 original_docs_df = snowflake_session.sql(original_docs_query).collect()
-                original_docs = {}
+                original_docs = {row['DOCUMENT_ID']: row for row in original_docs_df}
                 
-                # document_idをキーとした辞書を作成
-                for row in original_docs_df:
-                    original_docs[row['DOCUMENT_ID']] = {
-                        "title": row['TITLE'],
-                        "content": row['CONTENT'],
-                        "document_type": row['DOCUMENT_TYPE'],
-                        "department": row['DEPARTMENT']
-                    }
-                
-                # 検索結果とオリジナルドキュメントを組み合わせて関連ドキュメントリストを作成
                 relevant_docs = []
-                seen_doc_ids = set()  # 処理済みのドキュメントIDを記録
+                seen_doc_ids = set()
                 
                 for result in search_results.results:
                     doc_id = result["document_id"]
-                    # 既に処理済みのドキュメントIDはスキップ
-                    if doc_id in seen_doc_ids:
-                        continue
-                        
-                    if doc_id in original_docs:
+                    if doc_id not in seen_doc_ids and doc_id in original_docs:
+                        doc_info = original_docs[doc_id]
                         relevant_docs.append({
-                            "title": original_docs[doc_id]["title"],
-                            "content": original_docs[doc_id]["content"],
-                            "chunked_content": result["chunked_content"],  # チャンク化されたコンテンツも保持
-                            "document_type": original_docs[doc_id]["document_type"],
-                            "department": original_docs[doc_id]["department"]
+                            "title": doc_info["TITLE"],
+                            "content": doc_info["CONTENT"],
+                            "document_type": doc_info["DOCUMENT_TYPE"],
+                            "department": doc_info["DEPARTMENT"]
                         })
-                        seen_doc_ids.add(doc_id)  # 処理済みとしてマーク
+                        seen_doc_ids.add(doc_id)
                 
-                # 検索結果をコンテキストとして使用（チャンク化されたコンテンツを使用）
                 context = "参考文書:\n"
                 for doc in relevant_docs:
                     context += f"""
                     タイトル: {doc['title']}
                     種類: {doc['document_type']}
                     部署: {doc['department']}
-                    内容: {doc['chunked_content']}
+                    内容: {doc['content']}
                     ---
                     """
                 
-                # COMPLETEを使用して応答を生成
                 prompt_template = f"""
                 あなたはスノーリテールの社内アシスタントです。
                 以下の文脈を参考に、ユーザーからの質問に日本語で回答してください。
@@ -340,66 +306,59 @@ def render_rag_chatbot_page():
                 質問: {prompt}
                 """
                 
-                response = CompleteText(complete_model, prompt_template)
-                
-                # アシスタントの応答を表示
+                response = get_ai_response(ai_complete_model, prompt_template)
                 with st.chat_message("assistant"):
                     st.markdown(response)
                     with st.expander("参考ドキュメント"):
-                        for doc in relevant_docs:
-                            st.markdown(f"""
-                            **タイトル**: {doc['title']}  
-                            **種類**: {doc['document_type']}  
-                            **部署**: {doc['department']}  
-                            **内容**: {doc['content']}
-                            """)
+                        for i, doc in enumerate(relevant_docs):
+                            render_document_details(doc, i, hash(str(prompt)))
+                            if i < len(relevant_docs) - 1:
+                                st.markdown("---")
                 
-                # チャット履歴に追加
                 st.session_state.rag_messages.append({
                     "role": "assistant",
                     "content": response,
                     "relevant_docs": relevant_docs
                 })
-                st.session_state.rag_chat_history += f"AI: {response}\n"
+            else:
+                st.warning("関連するドキュメントが見つかりませんでした。")
                 
-            except Exception as search_error:
-                st.error(f"Cortex Search Serviceにアクセスできません。ワークショップでCortex Search Serviceが作成されていることを確認してください。")
-                st.code(str(search_error))
+        except Exception as e:
+            st.error(f"検索または応答の生成中にエラーが発生しました: {str(e)}")
+            
+            try:
+                fallback_prompt = f"以下の質問に日本語で回答してください。社内文書にアクセスできないため、一般的な知識に基づいて回答します。\n\n質問: {prompt}"
                 
-                # 代わりに通常のCOMPLETE関数で回答を生成
-                fallback_response = CompleteText(complete_model, f"以下の質問に日本語で回答してください。社内文書にアクセスできないため、一般的な知識に基づいて回答します。\n\n質問: {prompt}")
+                fallback_response = get_ai_response(ai_complete_model, fallback_prompt)
                 
                 with st.chat_message("assistant"):
                     st.markdown(fallback_response)
                     st.info("注: Cortex Search Serviceにアクセスできないため、一般的な知識に基づく回答を生成しています。")
                 
-                # チャット履歴に追加
                 st.session_state.rag_messages.append({
                     "role": "assistant",
                     "content": fallback_response
                 })
-                st.session_state.rag_chat_history += f"AI: {fallback_response}\n"
-            
-        except Exception as e:
-            st.error(f"応答の生成中にエラーが発生しました: {str(e)}")
-            st.code(str(e)) 
+                
+            except Exception as fallback_error:
+                st.error(f"フォールバック処理でもエラーが発生しました: {str(fallback_error)}")
 
 # =========================================================
 # メイン処理
 # =========================================================
 
-# サイドバーでの機能選択
+# サイドバー設定
 st.sidebar.title("AIモーニングワークショップ")
 selected_function = st.sidebar.radio(
     "機能を選択してください",
     ["シンプルチャットボット", "社内問い合わせチャットボット"]
 )
 
-# モデル選択（RAGチャットボットで使用）
+# モデル選択
 st.sidebar.title("モデル設定")
-complete_model = st.sidebar.selectbox(
-    "Completeモデルを選択してください",
-    COMPLETE_MODELS,
+ai_complete_model = st.sidebar.selectbox(
+    "AI_COMPLETEモデルを選択してください",
+    AI_COMPLETE_MODELS,
     index=0
 )
 
@@ -407,7 +366,7 @@ complete_model = st.sidebar.selectbox(
 st.title("🏪 スノーリテール 社内問い合わせチャットボット")
 st.markdown("---")
 
-# 選択された機能に応じた処理
+# 選択された機能の実行
 if selected_function == "シンプルチャットボット":
     render_simple_chatbot_page()
 elif selected_function == "社内問い合わせチャットボット":
